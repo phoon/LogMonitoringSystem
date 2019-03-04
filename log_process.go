@@ -82,16 +82,16 @@ func (r *ReadFromFile) Read(rc chan []byte) {
 //写入模块
 func (w *WriteToInfluxDB) Write(wc chan *Message) {
 	/*
-			InfluxDB关键概念（与传统数据库对比）：
-			database：数据库
-			measurement：数据库中的表
-			points：表里的一行数据（包含如下属性）：
+		InfluxDB关键概念（与传统数据库对比）：
+		database：数据库
+		measurement：数据库中的表
+		points：表里的一行数据（包含如下属性）：
 
-		 			 ·-- tags：各种有索引的属性
-					 |
-			points --·-- fields：各种记录的值
-					 |
-		             ·-- time：数据记录的时间戳，也是自动生成的主索引
+				 ·-- tags：各种有索引的属性
+				 |
+		points --·-- fields：各种记录的值
+				 |
+				 ·-- time：数据记录的时间戳，也是自动生成的主索引
 
 	*/
 
