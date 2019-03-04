@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
+	"github.com/influxdata/influxdb1-client/v2"
 	"io"
 	"log"
 	"net/url"
@@ -79,8 +81,65 @@ func (r *ReadFromFile) Read(rc chan []byte) {
 
 //写入模块
 func (w *WriteToInfluxDB) Write(wc chan *Message) {
+	/*
+			InfluxDB关键概念（与传统数据库对比）：
+			database：数据库
+			measurement：数据库中的表
+			points：表里的一行数据（包含如下属性）：
+
+		 			 ·-- tags：各种有索引的属性
+					 |
+			points --·-- fields：各种记录的值
+					 |
+		             ·-- time：数据记录的时间戳，也是自动生成的主索引
+
+	*/
+
+	//解析influxDBDsn
+	infSli := strings.Split(w.influxDBDsn, "@")
+
+	//创建一个新的 HTTPClient
+	c, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr:     infSli[0],
+		Username: infSli[1],
+		Password: infSli[2],
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	for v := range wc {
-		fmt.Println(v)
+		//创建一个新的point batch
+		bp, err := client.NewBatchPoints(client.BatchPointsConfig{
+			Database:  infSli[3],
+			Precision: infSli[4], //精度为秒
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		//创建一个新的point 并且添加至batch
+		tags := map[string]string{"Path": v.Path, "Method": v.Method, "Scheme": v.Scheme, "Status": v.Status}
+		fields := map[string]interface{}{
+			"UpstreamTime": v.UpstreamTime,
+			"RequestTime":  v.RequestTime,
+			"BytesSent":    v.BytesSent,
+		}
+
+		//表名, tags, fields, time
+		pt, err := client.NewPoint("nginx_log", tags, fields, v.TimeLocal)
+		if err != nil {
+			log.Fatal(err)
+		}
+		bp.AddPoint(pt)
+
+		//写入batch
+		if err := c.Write(bp); err != nil {
+			log.Fatal(err)
+		}
+
+		log.Println("write success!")
 	}
 
 	wg.Done()
@@ -156,12 +215,19 @@ func (l *LogProcess) Process() {
 var wg sync.WaitGroup
 
 func main() {
+	//从命令行获取要读取的文件以及连接influxDB数据库的凭证
+	var path, influDsn string
+	flag.StringVar(&path, "path", "./access.log", "read file path")
+	flag.StringVar(&influDsn, "influDsn", "http://localhost:8086@imooc@imoocpass@imooc@s", "influx data source")
+	flag.Parse()
+
 	r := &ReadFromFile{
-		path: "./access.log",
+		path: path,
 	}
 
 	w := &WriteToInfluxDB{
-		influxDBDsn: "username:password...",
+		//地址：端口@用户名@密码@数据库@精度
+		influxDBDsn: influDsn,
 	}
 
 	lp := &LogProcess{
