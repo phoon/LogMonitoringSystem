@@ -2,11 +2,12 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/influxdata/influxdb1-client/v2"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/influxdata/influxdb1-client/v2"
 )
 
 //使用接口机制，增强程序可扩展性
@@ -48,6 +51,71 @@ type Message struct {
 	UpstreamTime, RequestTime    float64
 }
 
+//系统状态监控
+type SystemInfo struct {
+	HandleLine   int     `json:"handleLine"`   //总处理日志行数
+	Tps          float64 `json:"tps"`          //系统吞吐量
+	ReadChanLen  int     `json:"readChanLen"`  //read channel 长度
+	WriteChanLen int     `json:"writeChanLen"` //write channel 长度
+	RunTime      string  `json:"runTime"`      //运行总时间
+	ErrNum       int     `json:"errNum"`       //错误数
+}
+
+const (
+	TypeHandleLine = 0
+	TypeErrNum     = 1
+)
+
+var TypeMonitorChan = make(chan int, 200)
+
+//监控模块封装
+type Monitor struct {
+	startTime time.Time
+	data      SystemInfo
+	tpsSli    []int //存储获取的数据
+}
+
+func (m *Monitor) start(lp *LogProcess) {
+
+	go func() {
+		for n := range TypeMonitorChan {
+			switch n {
+			case TypeErrNum:
+				m.data.ErrNum += 1
+			case TypeHandleLine:
+				m.data.HandleLine += 1
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(5 * time.Second)
+	go func() {
+		for {
+			<-ticker.C
+			m.tpsSli = append(m.tpsSli, m.data.HandleLine)
+			if len(m.tpsSli) > 2 {
+				m.tpsSli = m.tpsSli[1:]
+			}
+		}
+	}()
+
+	http.HandleFunc("/monitor", func(w http.ResponseWriter, r *http.Request) {
+		m.data.RunTime = time.Now().Sub(m.startTime).String()
+		m.data.ReadChanLen = len(lp.rc)
+		m.data.WriteChanLen = len(lp.wc)
+
+		if len(m.tpsSli) >= 2 {
+			m.data.Tps = float64(m.tpsSli[1]-m.tpsSli[0]) / 5
+		}
+
+		ret, _ := json.MarshalIndent(m.data, "", "\t")
+
+		io.WriteString(w, string(ret))
+	})
+
+	http.ListenAndServe(":9193", nil)
+}
+
 //读取模块
 func (r *ReadFromFile) Read(rc chan []byte) {
 	//打开文件
@@ -72,6 +140,8 @@ func (r *ReadFromFile) Read(rc chan []byte) {
 		} else if err != nil {
 			panic(fmt.Sprintf("ReadBytes error: %s", err.Error()))
 		}
+		//每读到一行数据，就添加一个标记
+		TypeMonitorChan <- TypeHandleLine
 		//去除行尾换行符
 		rc <- line[:len(line)-1]
 	}
@@ -82,16 +152,16 @@ func (r *ReadFromFile) Read(rc chan []byte) {
 //写入模块
 func (w *WriteToInfluxDB) Write(wc chan *Message) {
 	/*
-			InfluxDB关键概念（与传统数据库对比）：
-			database：数据库
-			measurement：数据库中的表
-			points：表里的一行数据（包含如下属性）：
+		InfluxDB关键概念（与传统数据库对比）：
+		database：数据库
+		measurement：数据库中的表
+		points：表里的一行数据（包含如下属性）：
 
-		 			 ·-- tags：各种有索引的属性
-					 |
-			points --·-- fields：各种记录的值
-					 |
-		             ·-- time：数据记录的时间戳，也是自动生成的主索引
+				 ·-- tags：各种有索引的属性
+				 |
+		points --·-- fields：各种记录的值
+				 |
+				 ·-- time：数据记录的时间戳，也是自动生成的主索引
 
 	*/
 
@@ -159,6 +229,8 @@ func (l *LogProcess) Process() {
 		ret := r.FindStringSubmatch(string(v))
 
 		if len(ret) != 14 {
+			//记录错误
+			TypeMonitorChan <- TypeErrNum
 			log.Println("FindStringSubmatch fail:", string(v))
 			continue
 		}
@@ -168,7 +240,10 @@ func (l *LogProcess) Process() {
 		loc, _ := time.LoadLocation("Asia/Shanghai")
 		t, err := time.ParseInLocation("02/Jan/2006:15:04:05 +0000", ret[4], loc)
 		if err != nil {
+			//记录错误
+			TypeMonitorChan <- TypeErrNum
 			log.Println("ParseInLocation fail:", err.Error(), ret[4])
+			continue
 		}
 		message.TimeLocal = t
 
@@ -180,13 +255,18 @@ func (l *LogProcess) Process() {
 		// GET /foo?query=t HTTP/1.0
 		reqSli := strings.Split(ret[6], " ")
 		if len(reqSli) != 3 {
+			//记录错误
+			TypeMonitorChan <- TypeErrNum
 			log.Println("strings.Split fail:", ret[6])
+			continue
 		}
 		message.Method = reqSli[0]
 
 		//解析message.Path
 		u, err := url.Parse(reqSli[1])
 		if err != nil {
+			//记录错误
+			TypeMonitorChan <- TypeErrNum
 			log.Println("url parse fail:", err)
 			continue
 		}
@@ -241,5 +321,13 @@ func main() {
 	go lp.read.Read(lp.rc)
 	go lp.Process()
 	go lp.write.Write(lp.wc)
+
+	//开始监控
+	m := &Monitor{
+		startTime: time.Now(),
+		data:      SystemInfo{},
+	}
+	m.start(lp)
+
 	wg.Wait()
 }
