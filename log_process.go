@@ -158,7 +158,7 @@ func (w *WriteToInfluxDB) Write(wc chan *Message) {
 		points：表里的一行数据（包含如下属性）：
 				 ·-- tags：各种有索引的属性
 				 |
-		points --·-- fields：各种记录的值
+			points --·-- fields：各种记录的值
 				 |
 				 ·-- time：数据记录的时间戳，也是自动生成的主索引
 	*/
